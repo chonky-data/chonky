@@ -1,4 +1,7 @@
 # 🐱 Chonky - a simple Version Control System
+[![CI](https://github.com/chonky-data/chonky/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/chonky-data/chonky/actions/workflows/ci.yml)
+[![MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/chonky-data/chonky/blob/main/LICENSE)
+[![GitHub](https://img.shields.io/badge/repo-github-green.svg)](https://github.com/chonky-data/chonky)
 ## About
 "Chonky files need Chonky version control"
 
