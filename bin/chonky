@@ -1,0 +1,9 @@
+#!/bin/sh
+if [ -z "$PYTHON" ]; then
+  if hash python3 2>/dev/null; then
+    PYTHON=python3
+  else
+    PYTHON=python
+  fi
+fi
+PYTHONPATH=$(dirname "$0")/.. $PYTHON -m chonky $@
