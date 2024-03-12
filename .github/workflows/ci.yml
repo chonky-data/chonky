@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  MyPy:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.9'
+    - name: Install MyPy
+      run: pip install mypy
+    - name: Clone
+      uses: actions/checkout@v4
+    - name: MyPy
+      run: mypy chonky

@@ -5,19 +5,33 @@
 ## About
 "Chonky files need Chonky version control"
 
-Chonky is an extremely simple Version Control System (VCS) designed to be
+Chonky is designed to supplement existing version control systems that are
+typically unable to natively handle large files well (e.g. Git). For instance,
+large game assets, test data, and ML models.
+
+Chonky tries to be [monorepo](https://en.wikipedia.org/wiki/Monorepo) friendly,
+it does this by not forcing a 1-to-1 relationship with the parent VCS, which
+means you can have several Chonky sub-repositories within a parent repository.
+This makes it easy for developers to setup custom workflows in their build
+system to only pull the data they need (e.g. sync test-data only when running
+tests).
+
+Chonky is itself an extremely simple Version Control System (VCS) designed to be
 embedded within another VCS such as Git for the purposes of managing large
 binary assets. Chonky does not though take opinions on what that parent VCS is,
-infact its entirely optional.
+infact its entirely optional. It accomplishes this by allowing the parent VCS to
+manage a single text file per Chonky repository which represents the HEAD
+revision of each tile.
+
+Chonky has minimal infrastructure management. It does not require a dedicated
+server process! Instead it can be backed by a generic object-store or 
+filesystem. Currently AWS S3 is supported.
 
 Chonky is written entirely in Python and it's install is designed to be manged
 either via including it directly into the parent repository, Git Submodule, or
 Python Venv. This avoids each client needing to manage their own install of yet
 another system-wide dependency. This also ensures users are always using the
 right version of Chonky for the current project.
-
-Chonky does not require a dedicated server! Instead it can be backed by a
-generic object-store or filesystem. Currently only Amazon S3 is supported.
 
 ## Setup
 ### AWS S3
