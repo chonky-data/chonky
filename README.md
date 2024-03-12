@@ -65,7 +65,7 @@ Example of installing Chonky inside a Python Virtual Environment:
 ```
 python -m venv .venv
 source .venv/bin/activate
-pip install "git+ssh://git@github.com/jamesdolan/chonky.git@main"
+pip install "git+ssh://git@github.com/chonky-data/chonky.git@main"
 ```
 
 ## Usage
