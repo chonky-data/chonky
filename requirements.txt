@@ -1,0 +1,2 @@
+platformdirs>=4.1
+boto3>=1.33.9
