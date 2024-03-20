@@ -20,12 +20,13 @@ Chonky is itself an extremely simple Version Control System (VCS) designed to be
 embedded within another VCS such as Git for the purposes of managing large
 binary assets. Chonky does not though take opinions on what that parent VCS is,
 infact its entirely optional. It accomplishes this by allowing the parent VCS to
-manage a single text file per Chonky repository which represents the HEAD
-revision of each tile.
+manage a single text file per Chonky repository which records the HEAD revision
+of each file.
 
 Chonky has minimal infrastructure management. It does not require a dedicated
 server process! Instead it can be backed by a generic object-store or 
-filesystem. Currently AWS S3 is supported.
+filesystem. Currently AWS S3 is supported, but its
+[easy to add new backends](chonky/s3_remote.py).
 
 Chonky is written entirely in Python and it's install is designed to be manged
 either via including it directly into the parent repository, Git Submodule, or
