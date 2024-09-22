@@ -8,5 +8,5 @@ setup(name="chonky",
   entry_points={
     "console_scripts": ["chonky = chonky.__main__:main"]
   },
-  install_requires=["platformdirs>=4.1", "boto3>=1.33.9"]
+  install_requires=["platformdirs>=4.1", "boto3>=1.33.9", "tqdm>=4.66.5"]
 )

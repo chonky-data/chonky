@@ -1,5 +1,7 @@
-import concurrent.futures
-import boto3 # type: ignore
+from multiprocessing.dummy import Pool as ThreadPool
+
+import boto3 # type: ignore [import-untyped]
+from tqdm import tqdm # type: ignore [import-untyped]
 
 from chonky.base_remote import BaseRemote
 
@@ -14,14 +16,15 @@ class S3Remote(BaseRemote):
                 Bucket=self.remote_host,
                 Key=str(self.remote_root.joinpath(key)),
                 Filename=str(self.local_root.joinpath(key)))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as exe:
-            exe.map(fetch, keys)
+        with ThreadPool() as pool:
+            for _ in tqdm(pool.imap_unordered(fetch, keys), desc="Pulling", unit="files", total=len(keys)):
+                pass
         
 
     def push(self, keys: list[str]) -> None:
         s3 = boto3.resource('s3')
         bucket = s3.Bucket(self.remote_host)
-        for key in keys:
+        for key in tqdm(keys, desc="Pushing", unit="files"):
             remote_key = str(self.remote_root.joinpath(key))
             if not list(bucket.objects.filter(Prefix=remote_key)):
                 local_path = self.local_root.joinpath(key)
