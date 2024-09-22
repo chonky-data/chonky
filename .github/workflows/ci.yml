@@ -20,4 +20,4 @@ jobs:
     - name: Clone
       uses: actions/checkout@v4
     - name: MyPy
-      run: mypy chonky
+      run: mypy chonky --strict

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from chonky import Client, ClientError
 
-def main():
+def main() -> None:
     COMMANDS = {
         "status":   Client.status,
         "sync":     Client.sync,

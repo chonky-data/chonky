@@ -6,10 +6,10 @@ from chonky.base_remote import BaseRemote
 MAX_WORKERS = 16
 
 class S3Remote(BaseRemote):
-    def pull(self, keys: list[str]):
+    def pull(self, keys: list[str]) -> None:
         session = boto3.session.Session()
         client = session.client("s3")
-        def fetch(key):
+        def fetch(key: str) -> None:
             client.download_file(
                 Bucket=self.remote_host,
                 Key=str(self.remote_root.joinpath(key)),
@@ -18,7 +18,7 @@ class S3Remote(BaseRemote):
             exe.map(fetch, keys)
         
 
-    def push(self, keys: list[str]):
+    def push(self, keys: list[str]) -> None:
         s3 = boto3.resource('s3')
         bucket = s3.Bucket(self.remote_host)
         for key in keys:

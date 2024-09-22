@@ -3,11 +3,11 @@ import shutil
 import time
 
 from collections import OrderedDict
-from configparser import ConfigParser
+from configparser import ConfigParser as BaseConfigParser
 from hashlib import sha1
 from pathlib import Path
-from platformdirs import user_cache_dir # type: ignore
-from urllib.parse import urlparse
+from platformdirs import user_cache_dir
+from typing import Generator
 
 from chonky.make_remote import make_remote
 
@@ -16,7 +16,7 @@ class ClientError(Exception):
 
 # Provides an iterator for files under a directory located recursively.
 # Skips "hidden" files and directories that begin with ".".
-def RecursiveFiles(workspace_root: Path):
+def RecursiveFiles(workspace_root: Path) -> Generator[Path, None, None]:
     for curr_root, dirs, files in os.walk(workspace_root):
         rel_root = Path(curr_root).relative_to(workspace_root)
         dirs[:]  = [x for x in dirs  if not x.startswith(".")]
@@ -24,32 +24,31 @@ def RecursiveFiles(workspace_root: Path):
         for file in files:
             yield rel_root / file
 
-def HashFile(path: Path, buffer_size=65536):
+def HashFile(path: Path, buffer_size: int = 65536) -> str:
     hasher = sha1()
     with path.open("rb") as f:
         while data := f.read(buffer_size):
             hasher.update(data)
     return hasher.hexdigest()
 
-def MakeConfig():
-    config = ConfigParser(dict_type=OrderedDict)
-    config.optionxform = str # case sensitive
-    return config
+class ConfigParser(BaseConfigParser):
+    def optionxform(self, optionstr: str) -> str: # case sensitive
+        return optionstr
 
-def LoadConfig(path: Path):
-    config = MakeConfig()
+def LoadConfig(path: Path) -> ConfigParser:
+    config = ConfigParser()
     config.read(path)
     return config
 
-def BuildConfigForRoot(workspace_root: Path):
-    config = MakeConfig()
+def BuildConfigForRoot(workspace_root: Path) -> ConfigParser:
+    config = ConfigParser()
     config["HEAD"] = OrderedDict([
         (Path(file).as_posix() ,HashFile(workspace_root / file))
         for file in RecursiveFiles(workspace_root)
     ])
     return config
 
-def WriteConfig(config: ConfigParser, path: Path):
+def WriteConfig(config: ConfigParser, path: Path) -> None:
     # Sort file list to ensure configs are mergable / diffable...
     config["HEAD"] = OrderedDict(sorted(config["HEAD"].items(), key=lambda t: t[0]))
     with path.open("w") as f:
@@ -63,13 +62,13 @@ class ConfigDiff:
         self.missing  = HEAD_a.keys() - HEAD_b
         self.modified = {k for k in HEAD_a.keys() & HEAD_b if HEAD_a[k] != HEAD_b[k]}
 
-    def __bool__(self):
+    def __bool__(self) -> bool:
         return bool(self.added or self.missing or self.modified)
 
-    def changed_files(self):
+    def changed_files(self) -> set[str]:
         return self.added | self.missing | self.modified
 
-    def print(self):
+    def print(self) -> None:
         for f in self.added:
             print(f"  added     {f}")
         for f in self.missing:
@@ -79,7 +78,7 @@ class ConfigDiff:
 
 # Check for and list conflicts between two diffs...
 # Typically used for seeing if incoming remote changes conflict with workspace changes
-def ComputeConflicts(remote_diff: ConfigDiff, working_diff: ConfigDiff):
+def ComputeConflicts(remote_diff: ConfigDiff, working_diff: ConfigDiff) -> list[str]:
     return sorted(remote_diff.changed_files() & working_diff.changed_files())
 
 class Client:
@@ -96,24 +95,24 @@ class Client:
             self.local_config = LoadConfig(self.local_config_path)
         else:
             self.workspace_path.mkdir(parents=True, exist_ok=True)
-            self.local_config = MakeConfig()
+            self.local_config = ConfigParser()
             self.local_config.add_section("HEAD")
             WriteConfig(self.local_config, self.local_config_path)
 
     @property
-    def remote_uri(self):
+    def remote_uri(self) -> str:
         return self.remote_config["config"]["remote"]
 
     @property
-    def workspace_path(self):
+    def workspace_path(self) -> Path:
         return self.remote_config_path.parent.joinpath(self.remote_config["config"]["workspace"]).resolve()
 
     @property
-    def local_config_path(self):
+    def local_config_path(self) -> Path:
         return self.workspace_path.joinpath(".HEAD")
 
     # Syncs up the local cache to the remote
-    def cache_pull(self):
+    def cache_pull(self) -> None:
         remote = make_remote(remote_uri=self.remote_uri, local_root=self.local_cache_path)
         remote.pull([
             key
@@ -122,14 +121,14 @@ class Client:
         ])
 
     # Syncs up the remote cache to the local
-    def cache_push(self, touched_files: set):
+    def cache_push(self, touched_files: set[str]) -> None:
         remote = make_remote(remote_uri=self.remote_uri, local_root=self.local_cache_path)
         remote.push(list({
             self.local_config["HEAD"][file]
             for file in touched_files
         }))
 
-    def status(self):
+    def status(self) -> None:
         working_config = BuildConfigForRoot(self.workspace_path)
         remote_diff    = ConfigDiff(self.local_config, self.remote_config)
         working_diff   = ConfigDiff(self.local_config, working_config)
@@ -149,7 +148,7 @@ class Client:
         else:
             print("Workspace has no changes to submit.")
 
-    def sync(self):
+    def sync(self) -> None:
         working_config = BuildConfigForRoot(self.workspace_path)
         remote_diff    = ConfigDiff(self.local_config, self.remote_config)
         working_diff   = ConfigDiff(self.local_config, working_config)
@@ -174,7 +173,7 @@ class Client:
         # Commit local HEAD...
         WriteConfig(self.local_config,  self.local_config_path)
 
-    def submit(self):
+    def submit(self) -> None:
         start_time     = time.time() # used for detecting files that changed after hashing...
         working_config = BuildConfigForRoot(self.workspace_path)
         working_diff   = ConfigDiff(self.local_config, working_config)
@@ -208,7 +207,7 @@ class Client:
         WriteConfig(self.local_config,  self.local_config_path)
         WriteConfig(self.remote_config, self.remote_config_path)
 
-    def revert(self):
+    def revert(self) -> None:
         working_config = BuildConfigForRoot(self.workspace_path)
         working_diff = ConfigDiff(self.local_config, working_config)
         if not working_diff:
