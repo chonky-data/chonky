@@ -15,9 +15,11 @@ jobs:
     - uses: actions/setup-python@v5
       with:
         python-version: '3.9'
-    - name: Install MyPy
-      run: pip install mypy
+    - name: Install Requirements
+      run: pip install mypy black -r requirements.txt
     - name: Clone
       uses: actions/checkout@v4
     - name: MyPy
       run: mypy chonky --strict
+    - name: Formatting
+      run: black --check .
