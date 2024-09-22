@@ -1,1 +1,1 @@
-from .client import Client,ClientError
+from .client import Client as Client, ClientError as ClientError

@@ -37,10 +37,9 @@ right version of Chonky for the current project.
 ## Setup
 ### AWS S3
 - [Setup an S3 Bucket](https://docs.aws.amazon.com/AmazonS3/latest/userguide/GetStartedWithS3.html).
-  - Recommended: don't enable versioning since uses SHA1 as object keys and thus never overwrites an object.
+  - Recommended: don't enable versioning since it uses SHA1 as object keys and thus should never overwrite an object.
   - Recommended: only read/write access is required for users that you want to have access.
-- [Install AWS Credentials on local clients](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-files.html).
-  - Typical location: `~/.aws/credentials`
+- Login / Install AWS Credentials -> `aws configure`
 ### CHONKY config
 The `CHONKY` file points at both the remote object store ("remote"), and the
 Chonky Workspace root ("workspace"), as well as will track the HEAD version of
