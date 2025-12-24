@@ -1,12 +1,20 @@
 import abc
 
+from dataclasses import dataclass
 from pathlib import Path
 
 
+@dataclass
+class RemoteConfig:
+    type: str
+    bucket: str
+    endpoint: str
+    root: str = ""
+
+
 class BaseRemote(abc.ABC):
-    def __init__(self, remote_host: str, remote_root: Path, local_root: Path):
-        self.remote_host = remote_host
-        self.remote_root = remote_root
+    def __init__(self, config: RemoteConfig, local_root: Path):
+        self.config = config
         self.local_root = local_root
 
     @abc.abstractmethod

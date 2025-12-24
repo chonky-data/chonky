@@ -41,14 +41,26 @@ right version of Chonky for the current project.
   - Recommended: only read/write access is required for users that you want to have access.
 - Login / Install AWS Credentials -> `aws configure`
 ### CHONKY config
-The `CHONKY` file points at both the remote object store ("remote"), and the
-Chonky Workspace root ("workspace"), as well as will track the HEAD version of
-any files in the Chonky Repository.
+The `CHONKY` file configures the remote object store and workspace. It also
+tracks the HEAD version of each file in the Chonky Repository.
 
 To create a new repository, create a file named `CHONKY` in your parent VCS:
 ```
 [config]
-remote = s3://MyChonkyBucket
+type = s3
+bucket = MyChonkyBucket
+endpoint = s3.us-east-1.amazonaws.com
+workspace = Assets/
+
+[HEAD]
+```
+
+For S3-compatible services (e.g. MinIO), use your service's endpoint:
+```
+[config]
+type = s3
+bucket = my-bucket
+endpoint = http://minio-server:9000
 workspace = Assets/
 
 [HEAD]
