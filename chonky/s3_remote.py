@@ -1,7 +1,8 @@
 from multiprocessing.dummy import Pool as ThreadPool
 from pathlib import Path
 
-import boto3  # type: ignore [import-not-found]
+import boto3  # type: ignore [import-untyped]
+from botocore.exceptions import ClientError  # type: ignore [import-untyped]
 from tqdm import tqdm  # type: ignore [import-untyped]
 
 from chonky.base_remote import BaseRemote
@@ -40,10 +41,29 @@ class S3Remote(BaseRemote):
                 pass
 
     def push(self, keys: list[str]) -> None:
-        s3 = boto3.resource("s3", endpoint_url=self.endpoint)
-        bucket = s3.Bucket(self.config.bucket)
-        for key in tqdm(keys, desc="Pushing", unit="files"):
+        session = boto3.session.Session()
+        client = session.client("s3", endpoint_url=self.endpoint)
+
+        def does_key_exist(remote_key: str) -> bool:
+            try:
+                client.head_object(Bucket=self.config.bucket, Key=remote_key)
+                return True
+            except ClientError as e:
+                if e.response["ResponseMetadata"]["HTTPStatusCode"] != 404:
+                    raise
+                return False
+
+        def upload(key: str) -> None:
             remote_key = str(self.remote_root.joinpath(key))
-            if not list(bucket.objects.filter(Prefix=remote_key)):
-                local_path = self.local_root.joinpath(key)
-                bucket.upload_file(local_path, remote_key)
+            if not does_key_exist(remote_key):
+                local_path = str(self.local_root.joinpath(key))
+                client.upload_file(local_path, self.config.bucket, remote_key)
+
+        with ThreadPool() as pool:
+            for _ in tqdm(
+                pool.imap_unordered(upload, keys),
+                desc="Pushing",
+                unit="files",
+                total=len(keys),
+            ):
+                pass
