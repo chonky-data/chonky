@@ -1,6 +1,6 @@
 from multiprocessing.dummy import Pool as ThreadPool
 
-import boto3  # type: ignore [import-untyped]
+import boto3  # type: ignore [import-not-found]
 from tqdm import tqdm  # type: ignore [import-untyped]
 
 from chonky.base_remote import BaseRemote
