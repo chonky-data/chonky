@@ -1,9 +1,9 @@
 from multiprocessing.dummy import Pool as ThreadPool
 from pathlib import Path
 
-import boto3  # type: ignore [import-untyped]
-from botocore.exceptions import ClientError  # type: ignore [import-untyped]
-from tqdm import tqdm  # type: ignore [import-untyped]
+import boto3
+from botocore.exceptions import ClientError
+from tqdm import tqdm
 
 from chonky.base_remote import BaseRemote
 
