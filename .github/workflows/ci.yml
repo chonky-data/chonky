@@ -25,7 +25,7 @@ jobs:
     - name: Clone
       uses: actions/checkout@v4
     - name: Install Requirements
-      run: pip install mypy black pytest moto[s3] types-tqdm boto3-stubs[s3] -r requirements.txt
+      run: pip install mypy black pytest pytest-cov moto[s3] types-tqdm boto3-stubs[s3] -r requirements.txt
     - name: MyPy
       run: mypy chonky tests --strict
     - name: Formatting
@@ -33,4 +33,4 @@ jobs:
     - name: Tests
       run: |
         pip install -e .
-        pytest tests/
+        pytest tests/ --cov=chonky --cov-report=term-missing --cov-fail-under=75
