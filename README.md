@@ -5,34 +5,43 @@
 ## About
 "Chonky files need Chonky version control"
 
-Chonky is designed to supplement existing version control systems that are
-typically unable to natively handle large files well (e.g. Git). For instance,
-large game assets, test data, and ML models.
+Chonky syncs large binary files (game assets, ML models, test data) between a
+local workspace and a remote object store. File revisions are recorded in a
+text file called `CHONKY`. Chonky itself doesn't version this file - you manage
+it however you like: commit it to Git, another VCS, or track it manually.
 
-Chonky tries to be [monorepo](https://en.wikipedia.org/wiki/Monorepo) friendly,
-it does this by not forcing a 1-to-1 relationship with the parent VCS, which
-means you can have several Chonky sub-repositories within a parent repository.
-This makes it easy for developers to setup custom workflows in their build
-system to only pull the data they need (e.g. sync test-data only when running
-tests).
+### Why Chonky?
 
-Chonky is itself an extremely simple Version Control System (VCS) designed to be
-embedded within another VCS such as Git for the purposes of managing large
-binary assets. Chonky does not though take opinions on what that parent VCS is,
-infact its entirely optional. It accomplishes this by allowing the parent VCS to
-manage a single text file per Chonky repository which records the HEAD revision
-of each file.
+Tools like [Git LFS](https://git-lfs.com/) solve a similar problem but are
+tightly coupled to Git. LFS downloads all tracked files by default, and while
+include/exclude patterns exist, they're repository-wide settings rather than
+independent definitions you can commit per-project.
 
-Chonky has minimal infrastructure management. It does not require a dedicated
-server process! Instead it can be backed by a generic object-store or 
-filesystem. Currently AWS S3 is supported, but its
-[easy to add new backends](chonky/s3_remote.py).
+Chonky is decoupled from your VCS entirely. Each `CHONKY` file defines an
+independent set of assets, and you choose which to sync:
 
-Chonky is written entirely in Python and it's install is designed to be manged
-either via including it directly into the parent repository, Git Submodule, or
-Python Venv. This avoids each client needing to manage their own install of yet
-another system-wide dependency. This also ensures users are always using the
-right version of Chonky for the current project.
+```bash
+chonky --config=tests/CHONKY sync   # Pull only test data
+chonky --config=assets/CHONKY sync  # Pull only game assets
+chonky --config=models/CHONKY sync  # Pull only ML model weights
+chonky sync                         # Recursively pull all repos
+```
+
+This makes it easy to integrate with build systems that fetch resources
+on-demand rather than upfront.
+
+### Features
+
+- **Serverless** - Backed by standard object stores (S3, MinIO) rather than a
+  dedicated server. [Easy to add new backends.](chonky/s3_remote.py)
+- **[Monorepo](https://en.wikipedia.org/wiki/Monorepo) friendly** - Multiple
+  Chonky repositories can coexist within a single parent repository. Selectively
+  sync only what you need (e.g. pull test data only when running tests).
+- **Shared storage** - Multiple Chonky repositories can point to the same object
+  store. Adding a new repository is as simple as copying a `CHONKY` file, and
+  migrating files between repositories is zero-copy.
+- **No system dependencies** - Pure Python. Install via pip, Git submodule, or
+  vendor directly into your project.
 
 ## Setup
 ### AWS S3
