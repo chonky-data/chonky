@@ -1,0 +1,9 @@
+[run]
+omit = 
+    chonky/__main__.py
+
+[report]
+exclude_lines =
+    # Exclude mocked functions
+    def get_cache_path
+    def endpoint

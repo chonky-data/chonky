@@ -33,4 +33,4 @@ jobs:
     - name: Tests
       run: |
         pip install -e .
-        pytest tests/ --cov=chonky --cov-report=term-missing --cov-fail-under=75
+        pytest tests/ --cov=chonky --cov-report=term-missing --cov-fail-under=95
