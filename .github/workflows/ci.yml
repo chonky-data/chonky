@@ -8,18 +8,29 @@ on:
     branches:
       - main
 
+concurrency:
+  group: ${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
 jobs:
-  MyPy:
+  Linux:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.10", "3.12", "3.13"]
     steps:
     - uses: actions/setup-python@v5
       with:
-        python-version: '3.9'
+        python-version: ${{ matrix.python-version }}
     - name: Clone
       uses: actions/checkout@v4
     - name: Install Requirements
-      run: pip install mypy black -r requirements.txt
+      run: pip install mypy black pytest pytest-cov moto[s3] types-tqdm boto3-stubs[s3] -r requirements.txt
     - name: MyPy
-      run: mypy chonky --strict
+      run: mypy chonky tests --strict
     - name: Formatting
       run: black --check .
+    - name: Tests
+      run: |
+        pip install -e .
+        pytest tests/ --cov=chonky --cov-report=term-missing --cov-fail-under=95

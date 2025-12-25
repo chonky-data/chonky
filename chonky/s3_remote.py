@@ -1,21 +1,32 @@
 from multiprocessing.dummy import Pool as ThreadPool
+from pathlib import Path
 
-import boto3  # type: ignore [import-untyped]
-from tqdm import tqdm  # type: ignore [import-untyped]
+import boto3
+from botocore.exceptions import ClientError
+from tqdm import tqdm
 
 from chonky.base_remote import BaseRemote
 
-MAX_WORKERS = 16
-
 
 class S3Remote(BaseRemote):
+    @property
+    def endpoint(self) -> str:
+        endpoint = self.config.endpoint
+        if not endpoint.startswith(("http://", "https://")):
+            return f"https://{endpoint}"
+        return endpoint
+
+    @property
+    def remote_root(self) -> Path:
+        return Path(self.config.root) if self.config.root else Path("")
+
     def pull(self, keys: list[str]) -> None:
         session = boto3.session.Session()
-        client = session.client("s3")
+        client = session.client("s3", endpoint_url=self.endpoint)
 
         def fetch(key: str) -> None:
             client.download_file(
-                Bucket=self.remote_host,
+                Bucket=self.config.bucket,
                 Key=str(self.remote_root.joinpath(key)),
                 Filename=str(self.local_root.joinpath(key)),
             )
@@ -30,10 +41,29 @@ class S3Remote(BaseRemote):
                 pass
 
     def push(self, keys: list[str]) -> None:
-        s3 = boto3.resource("s3")
-        bucket = s3.Bucket(self.remote_host)
-        for key in tqdm(keys, desc="Pushing", unit="files"):
+        session = boto3.session.Session()
+        client = session.client("s3", endpoint_url=self.endpoint)
+
+        def does_key_exist(remote_key: str) -> bool:
+            try:
+                client.head_object(Bucket=self.config.bucket, Key=remote_key)
+                return True
+            except ClientError as e:
+                if e.response["ResponseMetadata"]["HTTPStatusCode"] != 404:
+                    raise
+                return False
+
+        def upload(key: str) -> None:
             remote_key = str(self.remote_root.joinpath(key))
-            if not list(bucket.objects.filter(Prefix=remote_key)):
-                local_path = self.local_root.joinpath(key)
-                bucket.upload_file(local_path, remote_key)
+            if not does_key_exist(remote_key):
+                local_path = str(self.local_root.joinpath(key))
+                client.upload_file(local_path, self.config.bucket, remote_key)
+
+        with ThreadPool() as pool:
+            for _ in tqdm(
+                pool.imap_unordered(upload, keys),
+                desc="Pushing",
+                unit="files",
+                total=len(keys),
+            ):
+                pass

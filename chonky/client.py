@@ -9,6 +9,7 @@ from pathlib import Path
 from platformdirs import user_cache_dir
 from typing import Generator
 
+from chonky.base_remote import RemoteConfig
 from chonky.make_remote import make_remote
 
 
@@ -16,15 +17,33 @@ class ClientError(Exception):
     pass
 
 
+def get_cache_path() -> Path:
+    return Path(
+        user_cache_dir(appname="chonky", appauthor="chonky", ensure_exists=True)
+    )
+
+
+# Check if a file path matches any ignore pattern
+def MatchesIgnorePattern(file_path: Path, patterns: list[str]) -> bool:
+    return any(file_path.match(pattern) for pattern in patterns)
+
+
 # Provides an iterator for files under a directory located recursively.
-# Skips "hidden" files and directories that begin with ".".
-def RecursiveFiles(workspace_root: Path) -> Generator[Path, None, None]:
+# Skips files and directories that match ignore patterns.
+def RecursiveFiles(
+    workspace_root: Path, ignore_patterns: list[str]
+) -> Generator[Path, None, None]:
     for curr_root, dirs, files in os.walk(workspace_root):
         rel_root = Path(curr_root).relative_to(workspace_root)
-        dirs[:] = [x for x in dirs if not x.startswith(".")]
-        files[:] = [x for x in files if not x.startswith(".")]
+        # Filter directories based on ignore patterns
+        dirs[:] = [
+            d for d in dirs if not MatchesIgnorePattern(rel_root / d, ignore_patterns)
+        ]
+        # Filter files based on ignore patterns
         for file in files:
-            yield rel_root / file
+            file_path = rel_root / file
+            if not MatchesIgnorePattern(file_path, ignore_patterns):
+                yield file_path
 
 
 def HashFile(path: Path, buffer_size: int = 65536) -> str:
@@ -46,12 +65,14 @@ def LoadConfig(path: Path) -> ConfigParser:
     return config
 
 
-def BuildConfigForRoot(workspace_root: Path) -> ConfigParser:
+def BuildConfigForRoot(
+    workspace_root: Path, ignore_patterns: list[str]
+) -> ConfigParser:
     config = ConfigParser()
     config["HEAD"] = OrderedDict(
         [
             (Path(file).as_posix(), HashFile(workspace_root / file))
-            for file in RecursiveFiles(workspace_root)
+            for file in RecursiveFiles(workspace_root, ignore_patterns)
         ]
     )
     return config
@@ -98,12 +119,10 @@ class Client:
         if not config_path.is_file():
             raise ClientError(f"Config={config_path} was not found")
         # ensure local cache directory exists...
-        self.local_cache_path = Path(
-            user_cache_dir(appname="chonky", appauthor="chonky", ensure_exists=True)
-        )
-        # load the remote repository config and HEAD state...
-        self.remote_config_path = config_path
-        self.remote_config = LoadConfig(self.remote_config_path)
+        self.local_cache_path = get_cache_path()
+        # load the chonky config and HEAD state...
+        self.config_path = config_path
+        self.config = LoadConfig(self.config_path)
         # create or load local repository HEAD state...
         if self.local_config_path.is_file():
             self.local_config = LoadConfig(self.local_config_path)
@@ -114,42 +133,48 @@ class Client:
             WriteConfig(self.local_config, self.local_config_path)
 
     @property
-    def remote_uri(self) -> str:
-        return self.remote_config["config"]["remote"]
+    def remote_config(self) -> RemoteConfig:
+        config = self.config["config"]
+        return RemoteConfig(
+            type=config["type"],
+            bucket=config["bucket"],
+            endpoint=config["endpoint"],
+            root=config.get("root", ""),
+        )
 
     @property
     def workspace_path(self) -> Path:
-        return self.remote_config_path.parent.joinpath(
-            self.remote_config["config"]["workspace"]
+        return self.config_path.parent.joinpath(
+            self.config["config"]["workspace"]
         ).resolve()
 
     @property
     def local_config_path(self) -> Path:
         return self.workspace_path.joinpath(".HEAD")
 
+    @property
+    def ignore_patterns(self) -> list[str]:
+        builtin_ignores = [".HEAD"]
+        if "ignore" not in self.config["config"]:
+            return builtin_ignores
+        ignore_text = self.config["config"]["ignore"]
+        return ignore_text.split() + builtin_ignores
+
     # Syncs up the local cache to the remote
     def cache_pull(self) -> None:
-        remote = make_remote(
-            remote_uri=self.remote_uri, local_root=self.local_cache_path
-        )
+        remote = make_remote(self.remote_config, self.local_cache_path)
         remote.pull(
-            [
-                key
-                for key in self.remote_config["HEAD"].values()
-                if not remote.has_local(key)
-            ]
+            [key for key in self.config["HEAD"].values() if not remote.has_local(key)]
         )
 
     # Syncs up the remote cache to the local
     def cache_push(self, touched_files: set[str]) -> None:
-        remote = make_remote(
-            remote_uri=self.remote_uri, local_root=self.local_cache_path
-        )
+        remote = make_remote(self.remote_config, self.local_cache_path)
         remote.push(list({self.local_config["HEAD"][file] for file in touched_files}))
 
     def status(self) -> None:
-        working_config = BuildConfigForRoot(self.workspace_path)
-        remote_diff = ConfigDiff(self.local_config, self.remote_config)
+        working_config = BuildConfigForRoot(self.workspace_path, self.ignore_patterns)
+        remote_diff = ConfigDiff(self.local_config, self.config)
         working_diff = ConfigDiff(self.local_config, working_config)
         # Check for conflicts...
         if conflicts := ComputeConflicts(remote_diff, working_diff):
@@ -170,8 +195,8 @@ class Client:
             print("Workspace has no changes to submit.")
 
     def sync(self) -> None:
-        working_config = BuildConfigForRoot(self.workspace_path)
-        remote_diff = ConfigDiff(self.local_config, self.remote_config)
+        working_config = BuildConfigForRoot(self.workspace_path, self.ignore_patterns)
+        remote_diff = ConfigDiff(self.local_config, self.config)
         working_diff = ConfigDiff(self.local_config, working_config)
         if not remote_diff:
             # No incoming changes, we can early out...
@@ -182,7 +207,7 @@ class Client:
         self.cache_pull()
         # Commit changes to local cache and workspace...
         for file in remote_diff.added | remote_diff.modified:
-            key = self.remote_config["HEAD"][file]
+            key = self.config["HEAD"][file]
             self.local_config["HEAD"][file] = key
             file_path = self.workspace_path.joinpath(file)
             cache_path = self.local_cache_path.joinpath(key)
@@ -198,12 +223,12 @@ class Client:
         start_time = (
             time.time()
         )  # used for detecting files that changed after hashing...
-        working_config = BuildConfigForRoot(self.workspace_path)
+        working_config = BuildConfigForRoot(self.workspace_path, self.ignore_patterns)
         working_diff = ConfigDiff(self.local_config, working_config)
         if not working_diff:
             # No localing changes, we can early exit...
             return
-        if ConfigDiff(self.local_config, self.remote_config):
+        if ConfigDiff(self.local_config, self.config):
             raise ClientError(
                 f"Pending remote changes are available that must first be resolved. Run 'chonky sync' first."
             )
@@ -225,15 +250,15 @@ class Client:
         # Validate the working HEAD has not changed since
         # Overwrite local and remote HEADs (in memory)...
         self.local_config["HEAD"] = working_config["HEAD"]
-        self.remote_config["HEAD"] = working_config["HEAD"]
+        self.config["HEAD"] = working_config["HEAD"]
         # Push added/modified objects to the remote...
         self.cache_push(working_diff.added | working_diff.modified)
         # Commit the new local and remote HEAD...
         WriteConfig(self.local_config, self.local_config_path)
-        WriteConfig(self.remote_config, self.remote_config_path)
+        WriteConfig(self.config, self.config_path)
 
     def revert(self) -> None:
-        working_config = BuildConfigForRoot(self.workspace_path)
+        working_config = BuildConfigForRoot(self.workspace_path, self.ignore_patterns)
         working_diff = ConfigDiff(self.local_config, working_config)
         if not working_diff:
             # No localing changes, we can early exit...
