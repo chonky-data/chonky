@@ -74,6 +74,16 @@ workspace = Assets/
 
 [HEAD]
 ```
+### Compression
+Compression is automatic — there is nothing to configure. On `submit` each file is
+compressed (gzip) and transparently restored on `sync`, but only kept compressed when
+it actually shrinks, so already-compressed assets are stored as-is. Objects keep the
+content hash as their key with the codec as an extension (e.g. `<sha1>.gz`), so they
+remain standard files any tool can open, and older uncompressed objects keep working.
+
+Object identity is always the hash of the *uncompressed* content, so chonky does not
+rely on compressed bytes being byte-for-byte reproducible across machines — any valid
+encoding of the same content is interchangeable.
 ### Exclude Workspace from parent VCS
 While the `CHONKY` file should be tracked by your parent VCS, the Chonky
 Workspace should be excluded. In Git this can be done by adding the Chonky
