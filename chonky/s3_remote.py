@@ -1,29 +1,31 @@
 import threading
+import time
 from multiprocessing.dummy import Pool as ThreadPool
 from pathlib import Path
 
 import boto3
 from boto3.s3.transfer import TransferConfig
 from botocore.config import Config
-from botocore.exceptions import ClientError
 from tqdm import tqdm
 
 from chonky.base_remote import BaseRemote
 
-# Files transferred in parallel; the size of the push/pull worker pool.
-MAX_CONCURRENT_FILES = 4
-# Parts of a single file transferred at once (TransferConfig.max_concurrency).
-CONCURRENT_PARTS_PER_FILE = 8
+# Up to MAX_CONCURRENT_FILES files transfer at once, each split into
+# CONCURRENT_PARTS_PER_FILE parallel parts; the product is the live connection ceiling.
+MAX_CONCURRENT_FILES = 2
+CONCURRENT_PARTS_PER_FILE = 2
 
 CLIENT_CONFIG = Config(
-    connect_timeout=60,
+    # The body upload (write) is bounded by connect_timeout, not read_timeout, so both
+    # are raised. It is a per-stall limit (no progress for the interval), not
+    # per-transfer, so the value is independent of file size.
+    connect_timeout=300,
     read_timeout=300,
     retries={"max_attempts": 5, "mode": "standard"},
-    # Every request runs on a transfer worker thread, bounded at
-    # CONCURRENT_PARTS_PER_FILE per file across MAX_CONCURRENT_FILES files: the exact
-    # ceiling of live connections.
     max_pool_connections=MAX_CONCURRENT_FILES * CONCURRENT_PARTS_PER_FILE,
-    request_checksum_calculation="when_required", # avoid per-part CRC reducing callback frequency
+    # The default per-part CRC wraps the body in aws-chunked encoding, which coarsens
+    # the byte progress callbacks; when_required keeps them fine-grained.
+    request_checksum_calculation="when_required",
 )
 
 TRANSFER_CONFIG = TransferConfig(
@@ -33,8 +35,8 @@ TRANSFER_CONFIG = TransferConfig(
 )
 
 
-class _ProgressCallback:
-    # boto3 invokes the transfer callback from multiple part threads at once, and
+class _ByteProgress:
+    # upload_file invokes the callback from multiple part threads at once, and
     # tqdm.update is not thread-safe, so serialize updates with a lock.
     def __init__(self, pbar: tqdm):
         self._pbar = pbar
@@ -43,6 +45,32 @@ class _ProgressCallback:
     def __call__(self, bytes_amount: int) -> None:
         with self._lock:
             self._pbar.update(bytes_amount)
+
+
+class _PullProgress:
+    # The bar counts completed objects; bytes from download_file's callback drive a
+    # recent-window MB/s readout in the postfix. Both touch the bar from different
+    # threads, so one lock guards every bar mutation.
+    def __init__(self, pbar: tqdm):
+        self._pbar = pbar
+        self._lock = threading.Lock()
+        self._window_bytes = 0
+        self._last = time.monotonic()
+
+    def on_bytes(self, bytes_amount: int) -> None:
+        with self._lock:
+            self._window_bytes += bytes_amount
+            now = time.monotonic()
+            interval = now - self._last
+            if interval >= 0.5:
+                rate = self._window_bytes / interval / 1e6
+                self._pbar.set_postfix_str(f"{rate:.1f} MB/s", refresh=True)
+                self._window_bytes = 0
+                self._last = now
+
+    def on_object_done(self) -> None:
+        with self._lock:
+            self._pbar.update(1)
 
 
 class S3Remote(BaseRemote):
@@ -64,13 +92,8 @@ class S3Remote(BaseRemote):
     def pull(self, keys: list[str]) -> None:
         client = self._client()
 
-        with tqdm(
-            desc="Pulling",
-            unit="B",
-            unit_scale=True,
-            unit_divisor=1024,
-        ) as pbar:
-            callback = _ProgressCallback(pbar)
+        with tqdm(total=len(keys), desc="Pulling", unit="obj") as pbar:
+            progress = _PullProgress(pbar)
 
             def fetch(key: str) -> None:
                 client.download_file(
@@ -78,36 +101,20 @@ class S3Remote(BaseRemote):
                     Key=str(self.remote_root.joinpath(key)),
                     Filename=str(self.local_root.joinpath(key)),
                     Config=TRANSFER_CONFIG,
-                    Callback=callback,
+                    Callback=progress.on_bytes,
                 )
 
             with ThreadPool(MAX_CONCURRENT_FILES) as pool:
                 for _ in pool.imap_unordered(fetch, keys):
-                    pass
+                    progress.on_object_done()
 
     def push(self, keys: list[str]) -> None:
         client = self._client()
 
-        def does_key_exist(remote_key: str) -> bool:
-            try:
-                client.head_object(Bucket=self.config.bucket, Key=remote_key)
-                return True
-            except ClientError as e:
-                if e.response["ResponseMetadata"]["HTTPStatusCode"] != 404:
-                    raise
-                return False
-
-        def to_upload(key: str):
-            remote_key = str(self.remote_root.joinpath(key))
-            if does_key_exist(remote_key):
-                return None
-            local_path = self.local_root.joinpath(key)
-            return (str(local_path), remote_key, local_path.stat().st_size)
-
-        with ThreadPool(MAX_CONCURRENT_FILES) as pool:
-            pending = [item for item in pool.imap_unordered(to_upload, keys) if item]
-
-        total_bytes = sum(size for _, _, size in pending)
+        # Content-addressed keys make re-uploading an existing blob a harmless
+        # idempotent overwrite, so upload unconditionally rather than probing S3.
+        # Byte total comes from local stat (no S3 request).
+        total_bytes = sum(self.local_root.joinpath(key).stat().st_size for key in keys)
 
         with tqdm(
             total=total_bytes,
@@ -116,18 +123,17 @@ class S3Remote(BaseRemote):
             unit_scale=True,
             unit_divisor=1024,
         ) as pbar:
-            callback = _ProgressCallback(pbar)
+            progress = _ByteProgress(pbar)
 
-            def upload(item) -> None:
-                local_path, remote_key, _ = item
+            def upload(key: str) -> None:
                 client.upload_file(
-                    local_path,
+                    str(self.local_root.joinpath(key)),
                     self.config.bucket,
-                    remote_key,
+                    str(self.remote_root.joinpath(key)),
                     Config=TRANSFER_CONFIG,
-                    Callback=callback,
+                    Callback=progress,
                 )
 
             with ThreadPool(MAX_CONCURRENT_FILES) as pool:
-                for _ in pool.imap_unordered(upload, pending):
+                for _ in pool.imap_unordered(upload, keys):
                     pass
