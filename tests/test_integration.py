@@ -1,3 +1,5 @@
+import gzip
+import os
 import socket
 import tempfile
 from pathlib import Path
@@ -9,7 +11,7 @@ import pytest
 from moto import mock_aws
 
 import chonky.client
-from chonky import Client, ClientError
+from chonky import Client, ClientError, compression
 from chonky.client import HashFile, LoadConfig, WriteConfig
 from chonky.s3_remote import S3Remote
 
@@ -396,6 +398,30 @@ def test_resubmit_same_content(chonky_repo: tuple[Path, Path]) -> None:
     assert config["HEAD"]["file1.txt"] == config["HEAD"]["file2.txt"]
 
 
+def test_submit_restages_when_cache_cleared(
+    chonky_repo: tuple[Path, Path], cache_dir: Path
+) -> None:
+    repo_root, workspace = chonky_repo
+
+    # Track a file, then wipe the shared cache while .HEAD still records its key.
+    tracked = workspace / "tracked.txt"
+    tracked.write_text("payload")
+    Client(repo_root / "CHONKY").submit()
+    for blob in cache_dir.iterdir():
+        blob.unlink()
+
+    # A new file with identical content resolves to the recorded key. Resolution must
+    # re-stage from the cleared cache rather than trusting .HEAD, or the push that
+    # follows stats a blob that is not there.
+    twin = workspace / "twin.txt"
+    twin.write_text("payload")
+    Client(repo_root / "CHONKY").submit()
+
+    config = LoadConfig(repo_root / "CHONKY")
+    assert config["HEAD"]["twin.txt"] == config["HEAD"]["tracked.txt"]
+    assert (cache_dir / config["HEAD"]["twin.txt"]).exists()
+
+
 def test_missing_config_file(temp_dir: Path, mock_s3_env: None) -> None:
     with pytest.raises(ClientError, match="not found"):
         Client(temp_dir / "nonexistent" / "CHONKY")
@@ -422,3 +448,121 @@ def test_custom_ignore_patterns(chonky_repo: tuple[Path, Path]) -> None:
     assert "normal.txt" in final_config["HEAD"]
     assert "test.tmp" not in final_config["HEAD"]
     assert "ignore_dir/file.txt" not in final_config["HEAD"]
+
+
+def test_compression_compresses_and_suffixes(
+    chonky_repo: tuple[Path, Path], cache_dir: Path
+) -> None:
+    repo_root, workspace = chonky_repo
+
+    file = workspace / "big.json"
+    content = b"A" * 100_000
+    file.write_bytes(content)
+    sha = HashFile(file)
+    Client(repo_root / "CHONKY").submit()
+
+    # The key carries the codec extension, in the config and the cache.
+    config = LoadConfig(repo_root / "CHONKY")
+    assert config["HEAD"]["big.json"] == f"{sha}.gz"
+    blob = cache_dir / f"{sha}.gz"
+    assert blob.exists()
+    assert blob.stat().st_size < len(content)
+    assert gzip.decompress(blob.read_bytes()) == content
+
+
+def test_compression_skips_incompressible(
+    chonky_repo: tuple[Path, Path], cache_dir: Path
+) -> None:
+    repo_root, workspace = chonky_repo
+
+    file = workspace / "noise.bin"
+    file.write_bytes(os.urandom(2000))
+    sha = HashFile(file)
+    Client(repo_root / "CHONKY").submit()
+
+    # Random data does not shrink, so it stays raw (no extension).
+    config = LoadConfig(repo_root / "CHONKY")
+    assert config["HEAD"]["noise.bin"] == sha
+    assert (cache_dir / sha).exists()
+    assert not (cache_dir / f"{sha}.gz").exists()
+
+
+def test_compression_round_trip_via_pull(
+    chonky_repo: tuple[Path, Path], cache_dir: Path
+) -> None:
+    repo_root, workspace = chonky_repo
+
+    file = workspace / "data.json"
+    content = b'{"values": [' + b"1," * 50_000 + b"0]}"
+    file.write_bytes(content)
+    sha = HashFile(file)
+    Client(repo_root / "CHONKY").submit()
+
+    # Drop the workspace file, local HEAD entry, and cache blob so sync must pull
+    # the compressed object back from S3 and decompress it.
+    file.unlink()
+    local_config = LoadConfig(workspace / ".HEAD")
+    del local_config["HEAD"]["data.json"]
+    WriteConfig(local_config, workspace / ".HEAD")
+    (cache_dir / f"{sha}.gz").unlink()
+
+    Client(repo_root / "CHONKY").sync()
+    assert file.read_bytes() == content
+    assert (cache_dir / f"{sha}.gz").exists()
+
+
+def test_compression_status_clean_after_submit(
+    chonky_repo: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo_root, workspace = chonky_repo
+
+    file = workspace / "doc.json"
+    file.write_bytes(b"x" * 50_000)
+    Client(repo_root / "CHONKY").submit()
+
+    # The workspace hashes to a bare key; the stored key has a .gz suffix. Status
+    # must compare content identity, not the full key, and report no changes.
+    Client(repo_root / "CHONKY").status()
+    output = capsys.readouterr().out
+    assert "up to date" in output.lower()
+    assert "no changes to submit" in output.lower()
+
+
+def test_compression_shared_across_repos(
+    chonky_repo: tuple[Path, Path],
+    cache_dir: Path,
+    temp_dir: Path,
+    mock_s3_bucket: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root, workspace = chonky_repo
+
+    content = b"shared-asset " * 10_000
+    (workspace / "a.json").write_bytes(content)
+    sha = HashFile(workspace / "a.json")
+    Client(repo_root / "CHONKY").submit()
+    assert (cache_dir / f"{sha}.gz").exists()
+
+    # A second repo against the same bucket + shared cache, holding the same content
+    # under a different path. It must converge on the same key AND reuse the cached
+    # blob rather than recompressing.
+    repo_b = temp_dir / "repo_b"
+    (repo_b / "Assets").mkdir(parents=True)
+    (repo_b / "CHONKY").write_text(
+        f"[config]\ntype = s3\nbucket = {mock_s3_bucket}\n"
+        "endpoint = http://localhost:5000\nworkspace = Assets/\n\n[HEAD]\n"
+    )
+    (repo_b / "Assets" / "copy.json").write_bytes(content)
+
+    compressions: list[Path] = []
+    original = compression.Gzip.compress
+
+    def spy(self: compression.Gzip, src: Path, dst: Path) -> None:
+        compressions.append(src)
+        original(self, src, dst)
+
+    monkeypatch.setattr(compression.Gzip, "compress", spy)
+    Client(repo_b / "CHONKY").submit()
+
+    assert LoadConfig(repo_b / "CHONKY")["HEAD"]["copy.json"] == f"{sha}.gz"
+    assert compressions == []  # reused the shared-cache blob; no recompression

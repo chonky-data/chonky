@@ -1,16 +1,28 @@
 import os
-import shutil
+import tempfile
 import time
 
 from collections import OrderedDict
 from configparser import ConfigParser as BaseConfigParser
+from functools import partial
 from hashlib import sha1
+from multiprocessing.dummy import Pool as ThreadPool
 from pathlib import Path
 from platformdirs import user_cache_dir
-from typing import Generator
+from tqdm import tqdm
+from typing import Generator, Optional
 
 from chonky.base_remote import RemoteConfig
+from chonky.compression import CODECS, WRITE_CODEC, CompressionType, ObjectKey
 from chonky.make_remote import make_remote
+
+# Codec passes (compress on submit, decompress on sync/revert) are CPU-bound;
+# gzip releases the GIL, so a thread pool sized to the CPU count parallelizes them.
+MAX_CONCURRENT_CODEC = os.cpu_count() or 4
+
+# Keep a compressed blob only when it saves at least this fraction of the original;
+# a marginal gain isn't worth paying the decompress cost on every read.
+COMPRESSION_MIN_SAVINGS = 0.10
 
 
 class ClientError(Exception):
@@ -91,7 +103,13 @@ class ConfigDiff:
         HEAD_b = config_b["HEAD"]
         self.added = HEAD_b.keys() - HEAD_a
         self.missing = HEAD_a.keys() - HEAD_b
-        self.modified = {k for k in HEAD_a.keys() & HEAD_b if HEAD_a[k] != HEAD_b[k]}
+        # Compare content identity, not the full key: a workspace-derived bare hash
+        # must not read as "modified" against a stored, compression-suffixed key.
+        self.modified = {
+            k
+            for k in HEAD_a.keys() & HEAD_b
+            if ObjectKey(HEAD_a[k]).content_key != ObjectKey(HEAD_b[k]).content_key
+        }
 
     def __bool__(self) -> bool:
         return bool(self.added or self.missing or self.modified)
@@ -172,6 +190,63 @@ class Client:
         remote = make_remote(self.remote_config, self.local_cache_path)
         remote.push(list({self.local_config["HEAD"][file] for file in touched_files}))
 
+    # The key this content is already cached under, if any — content new to this repo
+    # may sit in the shared cache from a sibling repo against the same bucket, to be
+    # reused rather than recompressed. We don't guarantee deterministic compression, so
+    # two encodings could rarely coexist; check the default codec first to prefer it.
+    def _cached_key(self, content_key: str) -> Optional[ObjectKey]:
+        default_first = [
+            WRITE_CODEC,
+            *(c for c in CompressionType if c is not WRITE_CODEC),
+        ]
+        for codec_type in default_first:
+            key = ObjectKey.compose(content_key, codec_type)
+            if self.local_cache_path.joinpath(key.filename).is_file():
+                return key
+        return None
+
+    # Pure per-blob work, safe to run in parallel: compress one workspace file
+    # (keeping the result only if it shrinks), then atomically commit it to the
+    # cache. Returns (content_key, stored key) so unordered results can be matched.
+    def _stage(self, item: tuple[str, str], start_time: float) -> tuple[str, ObjectKey]:
+        content_key, file = item
+        file_path = self.workspace_path.joinpath(file)
+        # Stage inside a temp dir on the cache's mount: the commit stays an atomic,
+        # zero-copy rename, and the temp is cleaned up automatically (even on error),
+        # so nothing leaks and concurrent submits can't collide.
+        with tempfile.TemporaryDirectory(dir=self.local_cache_path) as tmp:
+            temp_path = Path(tmp).joinpath("blob")
+            # Compress with the write codec; fall back to raw if it didn't save enough.
+            codec_type = WRITE_CODEC
+            CODECS[codec_type].compress(file_path, temp_path)
+            if temp_path.stat().st_size > file_path.stat().st_size * (
+                1 - COMPRESSION_MIN_SAVINGS
+            ):
+                codec_type = CompressionType.UNCOMPRESSED
+                CODECS[codec_type].compress(file_path, temp_path)
+            # Detect files modified after workspace hashing began.
+            if os.stat(file_path).st_mtime > start_time:
+                raise ClientError(f"{file} was modified while Chonky was running!")
+            final = ObjectKey.compose(content_key, codec_type)
+            os.rename(src=temp_path, dst=self.local_cache_path.joinpath(final.filename))
+            return content_key, final
+
+    # Decompress (or copy, for raw keys) a cached blob into the workspace.
+    def _materialize(self, item: tuple[str, Path]) -> None:
+        key, dst = item
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        CODECS[ObjectKey(key).type].decompress(self.local_cache_path.joinpath(key), dst)
+
+    def _materialize_all(self, items: list[tuple[str, Path]]) -> None:
+        with ThreadPool(MAX_CONCURRENT_CODEC) as pool:
+            for _ in tqdm(
+                pool.imap_unordered(self._materialize, items),
+                total=len(items),
+                desc="Extracting",
+                unit="file",
+            ):
+                pass
+
     def status(self) -> None:
         working_config = BuildConfigForRoot(self.workspace_path, self.ignore_patterns)
         remote_diff = ConfigDiff(self.local_config, self.config)
@@ -206,13 +281,15 @@ class Client:
         # Pull from remote to local cache...
         self.cache_pull()
         # Commit changes to local cache and workspace...
-        for file in remote_diff.added | remote_diff.modified:
-            key = self.config["HEAD"][file]
-            self.local_config["HEAD"][file] = key
-            file_path = self.workspace_path.joinpath(file)
-            cache_path = self.local_cache_path.joinpath(key)
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src=cache_path, dst=file_path)
+        changed = remote_diff.added | remote_diff.modified
+        for file in changed:
+            self.local_config["HEAD"][file] = self.config["HEAD"][file]
+        self._materialize_all(
+            [
+                (self.config["HEAD"][file], self.workspace_path.joinpath(file))
+                for file in changed
+            ]
+        )
         for file in remote_diff.missing:
             del self.local_config["HEAD"][file]
             self.workspace_path.joinpath(file).unlink()
@@ -232,21 +309,32 @@ class Client:
             raise ClientError(
                 f"Pending remote changes are available that must first be resolved. Run 'chonky sync' first."
             )
-        # Update the local HEAD to match the working HEAD...
-        for file, key in working_config["HEAD"].items():
-            cache_path = self.local_cache_path.joinpath(key)
-            if not cache_path.is_file():
-                file_path = self.workspace_path.joinpath(file)
-                # Attempt to ensure atomic submission...
-                # 1) copy to temp file
-                temp_path = cache_path.parent.joinpath(f"temp.{cache_path.name}")
-                shutil.copy2(src=file_path, dst=temp_path)
-                # 2) verify file was not modified before workspace hashing was performed
-                if os.stat(temp_path).st_mtime > start_time:
-                    temp_path.unlink()
-                    raise ClientError(f"{file} was modified while Chonky was running!")
-                # 3) commit final name
-                os.rename(src=temp_path, dst=cache_path)
+        # Resolve each working file to the key its content is stored under: reuse a
+        # blob already in the cache (possibly staged by a sibling repo against the same
+        # bucket), otherwise None for a genuine miss, staged below. Resolution is by
+        # cache presence alone, never the recorded HEAD -- a cleared cache must re-stage
+        # content we still track. Misses are deduped by content so each uncached blob is
+        # compressed exactly once, on disjoint paths, and staged in parallel.
+        keys = dict(working_config["HEAD"])  # file -> bare content hash
+        existing = {
+            file: self._cached_key(content_key) for file, content_key in keys.items()
+        }
+        to_stage = {keys[file]: file for file, key in existing.items() if key is None}
+        staged: dict[str, ObjectKey] = {}
+        if to_stage:
+            with ThreadPool(MAX_CONCURRENT_CODEC) as pool:
+                stage = partial(self._stage, start_time=start_time)
+                staged = dict(
+                    tqdm(
+                        pool.imap_unordered(stage, to_stage.items()),
+                        total=len(to_stage),
+                        desc="Compressing",
+                        unit="file",
+                    )
+                )
+        working_config["HEAD"] = {
+            file: (key or staged[keys[file]]).filename for file, key in existing.items()
+        }
         # Validate the working HEAD has not changed since
         # Overwrite local and remote HEADs (in memory)...
         self.local_config["HEAD"] = working_config["HEAD"]
@@ -266,11 +354,10 @@ class Client:
         print("Reverting:")
         for f in working_diff.changed_files():
             print(f"  {f}")
-        for file in working_diff.modified | working_diff.missing:
-            key = self.local_config["HEAD"][file]
-            file_path = self.workspace_path.joinpath(file)
-            cache_path = self.local_cache_path.joinpath(key)
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src=cache_path, dst=file_path)
+        materializations = [
+            (self.local_config["HEAD"][file], self.workspace_path.joinpath(file))
+            for file in working_diff.modified | working_diff.missing
+        ]
+        self._materialize_all(materializations)
         for file in working_diff.added:
             self.workspace_path.joinpath(file).unlink()
