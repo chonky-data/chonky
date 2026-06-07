@@ -1,7 +1,10 @@
+from __future__ import annotations
+
 import threading
 import time
 from multiprocessing.dummy import Pool as ThreadPool
 from pathlib import Path
+from typing import NoReturn
 
 import boto3
 from boto3.s3.transfer import TransferConfig
@@ -38,7 +41,7 @@ TRANSFER_CONFIG = TransferConfig(
 class _ByteProgress:
     # upload_file invokes the callback from multiple part threads at once, and
     # tqdm.update is not thread-safe, so serialize updates with a lock.
-    def __init__(self, pbar: tqdm):
+    def __init__(self, pbar: tqdm[NoReturn]):
         self._pbar = pbar
         self._lock = threading.Lock()
 
@@ -51,7 +54,7 @@ class _PullProgress:
     # The bar counts completed objects; bytes from download_file's callback drive a
     # recent-window MB/s readout in the postfix. Both touch the bar from different
     # threads, so one lock guards every bar mutation.
-    def __init__(self, pbar: tqdm):
+    def __init__(self, pbar: tqdm[NoReturn]):
         self._pbar = pbar
         self._lock = threading.Lock()
         self._window_bytes = 0
@@ -85,12 +88,10 @@ class S3Remote(BaseRemote):
     def remote_root(self) -> Path:
         return Path(self.config.root) if self.config.root else Path("")
 
-    def _client(self):
-        session = boto3.session.Session()
-        return session.client("s3", endpoint_url=self.endpoint, config=CLIENT_CONFIG)
-
     def pull(self, keys: list[str]) -> None:
-        client = self._client()
+        client = boto3.session.Session().client(
+            "s3", endpoint_url=self.endpoint, config=CLIENT_CONFIG
+        )
 
         with tqdm(total=len(keys), desc="Pulling", unit="obj") as pbar:
             progress = _PullProgress(pbar)
@@ -109,7 +110,9 @@ class S3Remote(BaseRemote):
                     progress.on_object_done()
 
     def push(self, keys: list[str]) -> None:
-        client = self._client()
+        client = boto3.session.Session().client(
+            "s3", endpoint_url=self.endpoint, config=CLIENT_CONFIG
+        )
 
         # Content-addressed keys make re-uploading an existing blob a harmless
         # idempotent overwrite, so upload unconditionally rather than probing S3.

@@ -556,11 +556,12 @@ def test_compression_shared_across_repos(
 
     compressions: list[Path] = []
     original = compression.Gzip.compress
-    monkeypatch.setattr(
-        compression.Gzip,
-        "compress",
-        lambda self, src, dst: compressions.append(src) or original(self, src, dst),
-    )
+
+    def spy(self: compression.Gzip, src: Path, dst: Path) -> None:
+        compressions.append(src)
+        original(self, src, dst)
+
+    monkeypatch.setattr(compression.Gzip, "compress", spy)
     Client(repo_b / "CHONKY").submit()
 
     assert LoadConfig(repo_b / "CHONKY")["HEAD"]["copy.json"] == f"{sha}.gz"
